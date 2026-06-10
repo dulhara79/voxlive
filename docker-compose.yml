@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      PORT:                    8080
+      GOOGLE_CLOUD_PROJECT:    ${GOOGLE_CLOUD_PROJECT}
+      SPEECH_LOCATION:         ${SPEECH_LOCATION:-us-central1}
+      ALLOWED_ORIGIN:          ${ALLOWED_ORIGIN:-http://localhost:5173}
+      # Mount service-account key (local dev / non-GCP environments only)
+      GOOGLE_APPLICATION_CREDENTIALS: /app/gcp-key.json
+    volumes:
+      # Replace left side with the actual path to your JSON key
+      - ${GCP_KEY_FILE:-./gcp-key.json}:/app/gcp-key.json:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout:  5s
+      retries:  3
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # WebSocket URL the browser connects to.
+        # Must be wss:// if backend is behind TLS termination.
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8080}
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+# ── Cloud Run / GKE note ──────────────────────────────────────────────────────
+# On Google Cloud infrastructure, remove the GOOGLE_APPLICATION_CREDENTIALS
+# env var and the volumes block — ADC (Workload Identity) is automatic.
