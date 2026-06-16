@@ -237,8 +237,3 @@ Chirp returns the detected `languageCode` per result. The frontend normalises `t
 → The file `public/audio-processor.js` must be served from the same origin.  
 → Some browsers block AudioWorklet on plain `http://` (non-localhost). Use `localhost` in dev or HTTPS in prod.
 
----
-
-## Licence
-
-MIT
