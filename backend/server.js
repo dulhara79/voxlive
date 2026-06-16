@@ -38,12 +38,12 @@ const RECOGNIZER_PATH = `projects/${PROJECT_ID}/locations/${LOCATION}/recognizer
 const STREAMING_CONFIG = {
   config: {
     explicitDecodingConfig: {
-      encoding:          'LINEAR16',
-      sampleRateHertz:   16000,
+      encoding: "LINEAR16",
+      sampleRateHertz: 16000,
       audioChannelCount: 1,
     },
-    languageCodes: ['si-LK', 'ta-LK', 'ta-IN', 'en-US', 'en-IN'],
-    model:         'chirp',
+    languageCodes: ["si-LK", "ta-LK", "ta-IN", "en-US", "en-IN"],
+    model: "chirp_3",
     features: {
       enableAutomaticPunctuation: true,
     },
