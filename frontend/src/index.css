@@ -249,12 +249,13 @@ body {
 
 .app__header-content {
   max-width: 980px;
-  margin: 0 auto 0 0;
+  margin: 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
+  width: 100%;
 }
 
 .app__brand {
@@ -383,6 +384,7 @@ body {
   flex: 1;
   max-width: 1000px;
   width: 100%;
+  margin: 0 auto;
   padding: 20px;
   display: flex;
   flex-direction: column;
@@ -466,15 +468,33 @@ body {
 }
 
 .lang-card--en {
-  background: linear-gradient(180deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.96));
+  background: var(--en-bg);
+  border-color: var(--en-border);
+}
+
+.lang-card--en .lang-card__native,
+.lang-card--en .lang-card__pct {
+  color: var(--en-text);
 }
 
 .lang-card--si {
-  background: linear-gradient(180deg, rgba(255, 251, 235, 0.96), rgba(255, 255, 255, 0.96));
+  background: var(--si-bg);
+  border-color: var(--si-border);
+}
+
+.lang-card--si .lang-card__native,
+.lang-card--si .lang-card__pct {
+  color: var(--si-text);
 }
 
 .lang-card--ta {
-  background: linear-gradient(180deg, rgba(245, 243, 255, 0.96), rgba(255, 255, 255, 0.96));
+  background: var(--ta-bg);
+  border-color: var(--ta-border);
+}
+
+.lang-card--ta .lang-card__native,
+.lang-card--ta .lang-card__pct {
+  color: var(--ta-text);
 }
 
 .lang-card--en .lang-card__fill { background: var(--en-bar); }
