@@ -17,3 +17,4 @@ Thumbs.db
 .vscode/
 .idea/
 backend/moj-transcription-project-da80453f68bc.json
+backend/diagnose.js
