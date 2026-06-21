@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useTranscription } from './hooks/useTranscription';
 
 // ── Language metadata ──────────────────────────────────────────────────────
@@ -15,10 +15,22 @@ function LangBadge({ lang }) {
   return <span className={`badge badge--${m.key}`}>{m.short}</span>;
 }
 
-function LangCard({ lang, isActive, pct }) {
+function LangCard({ lang, isActive, pct, onClick, disabled }) {
   const m = LANGS[lang];
   return (
-    <div className={`card card--${m.key}${isActive ? ' card--active' : ''}`}>
+    <div 
+      className={`card card--${m.key}${isActive ? ' card--active' : ''}${disabled ? ' card--disabled' : ''}`}
+      onClick={disabled ? undefined : onClick}
+      style={{ cursor: disabled ? 'not-allowed' : 'pointer' }}
+      role="button"
+      tabIndex={disabled ? -1 : 0}
+      onKeyDown={(e) => {
+        if (!disabled && onClick && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+    >
       <div className="card__native">{m.native}</div>
       <div className="card__label">{m.label}</div>
       <div className="card__track">
@@ -51,6 +63,7 @@ function StopIcon() {
 
 // ── Main app ───────────────────────────────────────────────────────────────
 export default function App() {
+  const [selectedLang, setSelectedLang] = useState(null);
   const {
     isRecording, isConnecting,
     segments, interim, langStats,
@@ -107,8 +120,10 @@ export default function App() {
           <LangCard
             key={lang}
             lang={lang}
-            isActive={activeLang === lang}
+            isActive={selectedLang === lang || (selectedLang === null && activeLang === lang)}
             pct={pct(lang)}
+            onClick={() => setSelectedLang(prev => prev === lang ? null : lang)}
+            disabled={isRecording || isConnecting}
           />
         ))}
       </section>
@@ -126,8 +141,12 @@ export default function App() {
           {segments.length === 0 && !interim.text && (
             <p className="empty">
               {isRecording
-                ? 'Listening — start speaking in Sinhala, English, or Tamil'
-                : 'Press the mic button below to begin'}
+                ? selectedLang
+                  ? `Listening — start speaking in ${LANGS[selectedLang].label}`
+                  : 'Listening — start speaking in Sinhala, English, or Tamil (Auto Detect)'
+                : selectedLang
+                  ? `Press the mic button below to start transcribing in ${LANGS[selectedLang].label}`
+                  : 'Press the mic button below to begin (Auto Detect)'}
             </p>
           )}
 
@@ -176,7 +195,7 @@ export default function App() {
             isRecording  ? 'fab--active'      : '',
             isConnecting ? 'fab--connecting'  : '',
           ].join(' ').trim()}
-          onClick={isRecording ? stopRecording : startRecording}
+          onClick={isRecording ? stopRecording : () => startRecording(selectedLang)}
           disabled={isConnecting}
           aria-label={isRecording ? 'Stop recording' : 'Start recording'}
         >
