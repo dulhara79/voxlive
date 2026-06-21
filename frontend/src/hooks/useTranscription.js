@@ -77,6 +77,7 @@ export function useTranscription() {
       }, WS_CONNECT_TIMEOUT);
 
       ws.onopen = () => {
+        console.log("[VoxLive] WebSocket connection established successfully.");
         clearTimeout(timeout);
         reconnectCount.current = 0;
         setIsConnecting(false);
@@ -89,6 +90,7 @@ export function useTranscription() {
 
           // Surface backend errors in the UI
           if (msg.type === "error") {
+            console.error("[VoxLive] Backend reported error:", msg.message);
             setError(msg.message || "Speech API error — check backend logs");
             return;
           }
@@ -96,6 +98,9 @@ export function useTranscription() {
           if (msg.type !== "transcription") return;
 
           const lang = normaliseLang(msg.languageCode);
+          console.log(`[VoxLive] Transcription received (isFinal=${msg.isFinal}): "${msg.transcript}" [lang=${lang}]`);
+
+
 
           if (msg.isFinal) {
             setInterim({ text: "", lang: "en-US" });
@@ -120,14 +125,16 @@ export function useTranscription() {
         }
       };
 
-      ws.onerror = () => {
+      ws.onerror = (err) => {
+        console.error("[VoxLive] WebSocket error event:", err);
         clearTimeout(timeout);
         reject(
           new Error("WebSocket error — check backend URL and CORS settings"),
         );
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        console.log(`[VoxLive] WebSocket closed. Code: ${event.code}, Reason: ${event.reason || "None"}`);
         // Auto-reconnect only while we should still be recording
         if (!isRecordingRef.current) return;
         if (reconnectCount.current >= MAX_RECONNECT) {
@@ -155,13 +162,15 @@ export function useTranscription() {
   }, []); // intentionally empty — openWebSocket references itself via closure for reconnect
 
   // ── Start ─────────────────────────────────────────────────────────────────
-  const startRecording = useCallback(async () => {
+  const startRecording = useCallback(async (languageCode) => {
     if (isRecordingRef.current) return;
+    console.log("[VoxLive] Starting recording lifecycle...");
     setError(null);
     setIsConnecting(true);
 
     try {
       // 1 — Mic permission
+      console.log("[VoxLive] Requesting microphone access...");
       const micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -173,11 +182,17 @@ export function useTranscription() {
       micStreamRef.current = micStream;
 
       // 2 — AudioContext at 16 kHz (browser resamples from device native rate)
+      console.log("[VoxLive] Initializing AudioContext at 16000Hz...");
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       const audioCtx = new AudioCtx({ sampleRate: 16000 });
+      if (audioCtx.state === "suspended") {
+        console.log("[VoxLive] AudioContext state is suspended. Resuming...");
+        await audioCtx.resume();
+      }
       audioCtxRef.current = audioCtx;
 
       // 3 — AudioWorklet
+      console.log("[VoxLive] Adding AudioWorklet module '/audio-processor.js'...");
       await audioCtx.audioWorklet.addModule("/audio-processor.js");
       const workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
       workletNodeRef.current = workletNode;
@@ -191,19 +206,29 @@ export function useTranscription() {
       silentGain.connect(audioCtx.destination);
 
       // 4 — WebSocket
+      console.log("[VoxLive] Opening WebSocket connection...");
       const ws = await openWebSocket();
-      ws.send(JSON.stringify({ type: "start" }));
+      const finalLang = typeof languageCode === "string" ? languageCode : null;
+      console.log(`[VoxLive] Sending 'start' control message to backend with languageCode: ${finalLang || "auto"}...`);
+      ws.send(JSON.stringify({ type: "start", languageCode: finalLang }));
 
       // 5 — Pipe PCM chunks → WebSocket (ArrayBuffer, sent as binary frame)
+      let chunkCount = 0;
       workletNode.port.onmessage = (e) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
+          chunkCount++;
+          if (chunkCount % 30 === 0) {
+            console.log(`[VoxLive] Audio flow: piped ${chunkCount} chunks to WebSocket`);
+          }
           wsRef.current.send(e.data);
         }
       };
 
+      console.log("[VoxLive] Recording active and streaming.");
       isRecordingRef.current = true;
       setIsRecording(true);
     } catch (err) {
+      console.error("[VoxLive] Error during startRecording:", err);
       setIsConnecting(false);
       setError(err.message || "Failed to start recording");
       teardownAudio();
@@ -216,6 +241,7 @@ export function useTranscription() {
 
   // ── Stop ──────────────────────────────────────────────────────────────────
   const stopRecording = useCallback(() => {
+    console.log("[VoxLive] Stopping recording lifecycle...");
     isRecordingRef.current = false;
     setIsRecording(false);
     setInterim({ text: "", lang: "en-US" });
@@ -227,13 +253,16 @@ export function useTranscription() {
 
     if (wsRef.current) {
       try {
+        console.log("[VoxLive] Sending 'stop' control message to backend...");
         wsRef.current.send(JSON.stringify({ type: "stop" }));
       } catch (_) {}
+      console.log("[VoxLive] Closing WebSocket...");
       wsRef.current.close();
       wsRef.current = null;
     }
 
     teardownAudio();
+    console.log("[VoxLive] Audio and WebSocket teardown completed.");
   }, [teardownAudio]);
 
   // ── Clear ─────────────────────────────────────────────────────────────────
