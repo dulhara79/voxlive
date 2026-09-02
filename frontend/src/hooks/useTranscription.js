@@ -5,28 +5,26 @@ const MAX_RECONNECT = 5;
 const RECONNECT_DELAY_MS = 2000;
 const WS_CONNECT_TIMEOUT = 6000;
 
-/**
- * Normalise a BCP-47 language code returned by Chirp into the three canonical
- * codes used by the UI: 'en-US', 'si-LK', 'ta-LK'.
- */
+// Toggle verbose client logging with VITE_DEBUG="false".
+const DEBUG = import.meta.env.VITE_DEBUG !== "false";
+const ts = () => new Date().toISOString().slice(11, 23);
+const dbg = (...a) => {
+  if (DEBUG) console.log(`[${ts()}] [VoxLive]`, ...a);
+};
+
+// The ONLY languages we ever display.
+const ALLOWED = new Set(["si-LK", "en-US", "ta-LK"]);
+
 function normaliseLang(code) {
-  if (!code) return "en-US";
+  if (!code) return null;
   const lower = code.toLowerCase();
   if (lower.startsWith("si")) return "si-LK";
   if (lower.startsWith("ta")) return "ta-LK";
-  return "en-US";
+  if (lower.startsWith("en")) return "en-US";
+  // "auto" / unknown => dropped, not silently relabelled English.
+  return null;
 }
 
-/**
- * useTranscription
- *
- * Manages the full lifecycle of:
- *   Mic → AudioContext (16kHz) → AudioWorklet (Float32→Int16)
- *     → WebSocket → Google Chirp backend
- *
- * All mutable handles live in refs so WebSocket callbacks never capture
- * stale closure values.
- */
 export function useTranscription() {
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -39,17 +37,29 @@ export function useTranscription() {
   });
   const [error, setError] = useState(null);
 
-  // Mutable refs — safe to access inside callbacks without stale-closure issues
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [diarizedSegments, setDiarizedSegments] = useState([]);
+  const [wasDiarizationTruncated, setWasDiarizationTruncated] = useState(false);
+
+  // Which backend path is live: "stream" (EN/TA real-time) or "microbatch"
+  // (Sinhala/mixed, ~2s). Lets the UI show an honest latency notice.
+  const [activePath, setActivePath] = useState(null);
+  const [microbatchMs, setMicrobatchMs] = useState(2000);
+
   const wsRef = useRef(null);
   const audioCtxRef = useRef(null);
   const workletNodeRef = useRef(null);
   const micStreamRef = useRef(null);
   const reconnectCount = useRef(0);
   const reconnectTimer = useRef(null);
-  const isRecordingRef = useRef(false); // mirrors isRecording state for callbacks
+  const isRecordingRef = useRef(false);
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
+  const modeRef = useRef("live");
+  const languageCodesRef = useRef([]);
+  const selectedSetRef = useRef(new Set()); // for the client-side filter
+
   const teardownAudio = useCallback(() => {
+    dbg("Tearing down audio graph.");
     if (workletNodeRef.current) {
       workletNodeRef.current.port.onmessage = null;
       workletNodeRef.current.disconnect();
@@ -60,14 +70,22 @@ export function useTranscription() {
       micStreamRef.current = null;
     }
     if (audioCtxRef.current) {
-      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current.close().catch(() => { });
       audioCtxRef.current = null;
     }
   }, []);
 
-  // ── WebSocket connection ──────────────────────────────────────────────────
+  /** Hard client-side filter: allowed whitelist + selected subset. */
+  const passesFilter = (normalized) => {
+    if (!normalized || !ALLOWED.has(normalized)) return false;
+    const sel = selectedSetRef.current;
+    if (sel.size > 0) return sel.has(normalized);
+    return true;
+  };
+
   const openWebSocket = useCallback(() => {
     return new Promise((resolve, reject) => {
+      dbg("Opening WebSocket:", WS_URL);
       const ws = new WebSocket(WS_URL);
       wsRef.current = ws;
 
@@ -77,7 +95,7 @@ export function useTranscription() {
       }, WS_CONNECT_TIMEOUT);
 
       ws.onopen = () => {
-        console.log("[VoxLive] WebSocket connection established successfully.");
+        dbg("[SYSTEM] Pipeline connected.");
         clearTimeout(timeout);
         reconnectCount.current = 0;
         setIsConnecting(false);
@@ -88,22 +106,56 @@ export function useTranscription() {
         try {
           const msg = JSON.parse(event.data);
 
-          // Surface backend errors in the UI
+          if (msg.type === "path") {
+            dbg(`[PATH] Backend selected "${msg.path}" path.`, msg);
+            setActivePath(msg.path);
+            if (msg.microbatchMs) setMicrobatchMs(msg.microbatchMs);
+            return;
+          }
+
           if (msg.type === "error") {
-            console.error("[VoxLive] Backend reported error:", msg.message);
+            dbg("[ERROR]", msg.message);
             setError(msg.message || "Speech API error — check backend logs");
+            setIsAnalyzing(false);
+            return;
+          }
+
+          if (msg.type === "analyzing") {
+            setIsAnalyzing(true);
+            return;
+          }
+
+          if (msg.type === "diarized_transcript") {
+            // Filter diarized segments to the allowed/selected languages too.
+            const segs = (msg.segments || []).filter((s) => passesFilter(s.lang));
+            dbg(`[DIARIZED] ${segs.length}/${(msg.segments || []).length} segment(s) kept after filter.`);
+            setDiarizedSegments(segs);
+            setWasDiarizationTruncated(msg.wasTruncated || false);
+            setIsAnalyzing(false);
+            if (msg.error) setError(msg.error);
+            if (wsRef.current) {
+              wsRef.current.close();
+              wsRef.current = null;
+            }
             return;
           }
 
           if (msg.type !== "transcription") return;
 
           const lang = normaliseLang(msg.languageCode);
-          console.log(`[VoxLive] Transcription received (isFinal=${msg.isFinal}): "${msg.transcript}" [lang=${lang}]`);
-
-
+          if (!passesFilter(lang)) {
+            dbg(
+              `[FILTER] dropped raw="${msg.languageCode}" normalized="${lang || "none"}"`,
+            );
+            setInterim({ text: "", lang: "en-US" });
+            return;
+          }
 
           if (msg.isFinal) {
             setInterim({ text: "", lang: "en-US" });
+            if (!msg.transcript.trim()) return;
+            dbg(`[FINAL] ${lang}: "${msg.transcript.trim().slice(0, 60)}"`);
+
             setSegments((prev) => [
               ...prev,
               {
@@ -113,29 +165,23 @@ export function useTranscription() {
                 confidence: msg.confidence ?? 0,
               },
             ]);
-            setLangStats((prev) => ({
-              ...prev,
-              [lang]: (prev[lang] ?? 0) + 1,
-            }));
+            setLangStats((prev) => ({ ...prev, [lang]: (prev[lang] ?? 0) + 1 }));
           } else {
             setInterim({ text: msg.transcript, lang });
           }
-        } catch (_) {
-          /* ignore malformed frames */
-        }
+        } catch (_) { }
       };
 
-      ws.onerror = (err) => {
-        console.error("[VoxLive] WebSocket error event:", err);
+      ws.onerror = (e) => {
+        console.error("[VoxLive] [CRITICAL] Socket exception:", e);
         clearTimeout(timeout);
         reject(
-          new Error("WebSocket error — check backend URL and CORS settings"),
+          new Error("WebSocket encountered a transport breakdown. Check configuration."),
         );
       };
 
       ws.onclose = (event) => {
-        console.log(`[VoxLive] WebSocket closed. Code: ${event.code}, Reason: ${event.reason || "None"}`);
-        // Auto-reconnect only while we should still be recording
+        dbg("[SYSTEM] Socket closed.", { code: event.code });
         if (!isRecordingRef.current) return;
         if (reconnectCount.current >= MAX_RECONNECT) {
           setError("Lost connection. Please stop and try again.");
@@ -144,104 +190,108 @@ export function useTranscription() {
           return;
         }
         reconnectCount.current++;
-        console.log(
-          `[VoxLive] Reconnecting (${reconnectCount.current}/${MAX_RECONNECT})…`,
-        );
+        dbg(`[RECONNECT] attempt ${reconnectCount.current}/${MAX_RECONNECT}`);
         reconnectTimer.current = setTimeout(() => {
           openWebSocket()
-            .then((ws) => ws.send(JSON.stringify({ type: "start" })))
-            .catch((err) => {
-              setError(err.message);
+            .then((ws) =>
+              ws.send(
+                JSON.stringify({
+                  type: "start",
+                  mode: modeRef.current,
+                  languageCodes: languageCodesRef.current,
+                }),
+              ),
+            )
+            .catch((e) => {
+              setError(e.message);
               setIsRecording(false);
               isRecordingRef.current = false;
             });
         }, RECONNECT_DELAY_MS);
       };
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally empty — openWebSocket references itself via closure for reconnect
+  }, []);
 
-  // ── Start ─────────────────────────────────────────────────────────────────
-  const startRecording = useCallback(async (languageCode) => {
-    if (isRecordingRef.current) return;
-    console.log("[VoxLive] Starting recording lifecycle...");
-    setError(null);
-    setIsConnecting(true);
+  const startRecording = useCallback(
+    async (languageCodes, mode = "live") => {
+      if (isRecordingRef.current) return;
+      dbg("[START] requested", { languageCodes, mode });
+      setError(null);
+      setIsConnecting(true);
+      setIsAnalyzing(false);
+      setDiarizedSegments([]);
+      setWasDiarizationTruncated(false);
+      setActivePath(null);
 
-    try {
-      // 1 — Mic permission
-      console.log("[VoxLive] Requesting microphone access...");
-      const micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          channelCount: 1,
-        },
-        video: false,
-      });
-      micStreamRef.current = micStream;
+      modeRef.current = mode;
+      languageCodesRef.current = languageCodes;
+      selectedSetRef.current = new Set(
+        (languageCodes || []).filter((l) => ALLOWED.has(l)),
+      );
 
-      // 2 — AudioContext at 16 kHz (browser resamples from device native rate)
-      console.log("[VoxLive] Initializing AudioContext at 16000Hz...");
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      const audioCtx = new AudioCtx({ sampleRate: 16000 });
-      if (audioCtx.state === "suspended") {
-        console.log("[VoxLive] AudioContext state is suspended. Resuming...");
-        await audioCtx.resume();
-      }
-      audioCtxRef.current = audioCtx;
+      let localAudioCtx = null;
+      let localMicStream = null;
+      let localWorkletNode = null;
 
-      // 3 — AudioWorklet
-      console.log("[VoxLive] Adding AudioWorklet module '/audio-processor.js'...");
-      await audioCtx.audioWorklet.addModule("/audio-processor.js");
-      const workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
-      workletNodeRef.current = workletNode;
+      try {
+        const ws = await openWebSocket();
 
-      // Connect: mic source → worklet → silent gain (keeps worklet alive without playback)
-      const source = audioCtx.createMediaStreamSource(micStream);
-      const silentGain = audioCtx.createGain();
-      silentGain.gain.value = 0;
-      source.connect(workletNode);
-      workletNode.connect(silentGain);
-      silentGain.connect(audioCtx.destination);
+        localMicStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+          },
+          video: false,
+        });
+        micStreamRef.current = localMicStream;
 
-      // 4 — WebSocket
-      console.log("[VoxLive] Opening WebSocket connection...");
-      const ws = await openWebSocket();
-      const finalLang = typeof languageCode === "string" ? languageCode : null;
-      console.log(`[VoxLive] Sending 'start' control message to backend with languageCode: ${finalLang || "auto"}...`);
-      ws.send(JSON.stringify({ type: "start", languageCode: finalLang }));
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        localAudioCtx = new AudioCtx({ sampleRate: 16000 });
+        audioCtxRef.current = localAudioCtx;
 
-      // 5 — Pipe PCM chunks → WebSocket (ArrayBuffer, sent as binary frame)
-      let chunkCount = 0;
-      workletNode.port.onmessage = (e) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          chunkCount++;
-          if (chunkCount % 30 === 0) {
-            console.log(`[VoxLive] Audio flow: piped ${chunkCount} chunks to WebSocket`);
+        await localAudioCtx.audioWorklet.addModule("/audio-processor.js");
+        if (localAudioCtx.state === "suspended") await localAudioCtx.resume();
+
+        localWorkletNode = new AudioWorkletNode(localAudioCtx, "pcm-processor");
+        workletNodeRef.current = localWorkletNode;
+
+        const source = localAudioCtx.createMediaStreamSource(localMicStream);
+        const silentGain = localAudioCtx.createGain();
+        silentGain.gain.value = 0;
+        source.connect(localWorkletNode);
+        localWorkletNode.connect(silentGain);
+        silentGain.connect(localAudioCtx.destination);
+
+        const finalLangs = Array.isArray(languageCodes) ? languageCodes : [];
+        ws.send(JSON.stringify({ type: "start", mode, languageCodes: finalLangs }));
+        dbg("[START] sent start frame", { finalLangs, mode });
+
+        localWorkletNode.port.onmessage = (e) => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(e.data);
           }
-          wsRef.current.send(e.data);
+        };
+
+        isRecordingRef.current = true;
+        setIsRecording(true);
+      } catch (e) {
+        console.error("[VoxLive] Initialization error:", e);
+        setIsConnecting(false);
+        setError(e.message || "Failed to start live capture pipeline.");
+        teardownAudio();
+        if (wsRef.current) {
+          wsRef.current.close();
+          wsRef.current = null;
         }
-      };
-
-      console.log("[VoxLive] Recording active and streaming.");
-      isRecordingRef.current = true;
-      setIsRecording(true);
-    } catch (err) {
-      console.error("[VoxLive] Error during startRecording:", err);
-      setIsConnecting(false);
-      setError(err.message || "Failed to start recording");
-      teardownAudio();
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
       }
-    }
-  }, [openWebSocket, teardownAudio]);
+    },
+    [openWebSocket, teardownAudio],
+  );
 
-  // ── Stop ──────────────────────────────────────────────────────────────────
   const stopRecording = useCallback(() => {
-    console.log("[VoxLive] Stopping recording lifecycle...");
+    dbg("[STOP] requested");
     isRecordingRef.current = false;
     setIsRecording(false);
     setInterim({ text: "", lang: "en-US" });
@@ -250,29 +300,27 @@ export function useTranscription() {
       clearTimeout(reconnectTimer.current);
       reconnectTimer.current = null;
     }
-
     if (wsRef.current) {
       try {
-        console.log("[VoxLive] Sending 'stop' control message to backend...");
         wsRef.current.send(JSON.stringify({ type: "stop" }));
-      } catch (_) {}
-      console.log("[VoxLive] Closing WebSocket...");
-      wsRef.current.close();
-      wsRef.current = null;
+      } catch (_) { }
+      if (modeRef.current === "live") {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     }
-
     teardownAudio();
-    console.log("[VoxLive] Audio and WebSocket teardown completed.");
   }, [teardownAudio]);
 
-  // ── Clear ─────────────────────────────────────────────────────────────────
   const clearTranscript = useCallback(() => {
+    dbg("[CLEAR] transcript");
     setSegments([]);
+    setDiarizedSegments([]);
     setInterim({ text: "", lang: "en-US" });
     setLangStats({ "en-US": 0, "si-LK": 0, "ta-LK": 0 });
+    setWasDiarizationTruncated(false);
   }, []);
 
-  // ── Cleanup on unmount ────────────────────────────────────────────────────
   useEffect(
     () => () => {
       if (isRecordingRef.current) stopRecording();
@@ -283,9 +331,14 @@ export function useTranscription() {
   return {
     isRecording,
     isConnecting,
+    isAnalyzing,
     segments,
     interim,
     langStats,
+    diarizedSegments,
+    wasDiarizationTruncated,
+    activePath,
+    microbatchMs,
     error,
     startRecording,
     stopRecording,
