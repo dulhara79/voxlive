@@ -4,13 +4,13 @@
  * Converts Float32 samples from the microphone to Int16 LINEAR16 PCM
  * and posts them to the main thread via zero-copy ArrayBuffer transfer.
  *
- * Buffer size: 4096 samples = 256 ms at 16 kHz.
+ * Buffer size: 2048 samples = 128 ms at 16 kHz.
  * This gives a good balance between latency and WebSocket overhead.
  */
 class PCMProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this._buf   = new Int16Array(4096);
+    this._buf   = new Int16Array(2048);
     this._index = 0;
   }
 
@@ -28,7 +28,7 @@ class PCMProcessor extends AudioWorkletProcessor {
         const copy = new Int16Array(this._buf);
         this.port.postMessage(copy.buffer, [copy.buffer]);
         // Allocate a fresh buffer for the next batch
-        this._buf   = new Int16Array(4096);
+        this._buf   = new Int16Array(2048);
         this._index = 0;
       }
     }
